@@ -53,9 +53,9 @@ pip install -r requirements.txt
 
 ### 4. Configure Alpaca
 
-Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` if you need to configure the account mode. The Trade page asks each browser session for its own Alpaca API key and secret. The fields are masked; credentials are held in that Streamlit session's server-side memory and are not written to disk, the repository, or shared with another session. Each person must create their own key pair in Alpaca. TrendPulse does not generate broker keys.
+Copy `.env.example` to `.env` to configure the account mode. `.env` is ignored by Git. The Trade page asks each browser session for its own Alpaca API key and secret. The fields are masked; credentials are held in that Streamlit session's server-side memory and are not written to disk, the repository, or shared with another session. Each person must create their own key pair in Alpaca. TrendPulse does not generate broker keys.
 
-Paper mode is the default. To enable live trading, explicitly set `paper = false` and `enable_live_trading = true` under `[alpaca]`, then connect using your own live key pair. The Trade page also requires an order preview, a confirmation checkbox, and typing `LIVE` before it will submit a live order. Never paste API keys into source code or commit them. The app has no sign-in system, so these credentials are isolated per browser session rather than bound to a verified identity; use authentication and HTTPS before hosting it for multiple people.
+Paper mode is the default. To enable live trading, explicitly set `ALPACA_PAPER=false` and `ALPACA_ENABLE_LIVE_TRADING=true` in `.env`, then connect using your own live key pair. The Trade page also requires an order preview, a confirmation checkbox, and typing `LIVE` before it will submit a live order. Never paste API keys into source code or commit them. The app has no sign-in system, so these credentials are isolated per browser session rather than bound to a verified identity; use authentication and HTTPS before hosting it for multiple people.
 
 ### 5. Run the Streamlit App
 ```bash

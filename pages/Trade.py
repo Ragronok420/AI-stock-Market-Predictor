@@ -2,9 +2,17 @@ import os
 import re
 import uuid
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parents[1] / ".env", override=False)
+except ImportError:
+    pass
 
 try:
     from alpaca.trading.client import TradingClient
