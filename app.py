@@ -1,11 +1,34 @@
+import os
+import re
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import re
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestClassifier
+
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv(Path(__file__).resolve().parent / ".env", override=False)
+except ImportError:
+    pass
+
+try:
+    from alpaca.data.enums import Adjustment, DataFeed
+    from alpaca.data.historical import StockHistoricalDataClient
+    from alpaca.data.requests import StockBarsRequest
+    from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+    ALPACA_DATA_IMPORT_ERROR = None
+except ImportError as exc:
+    Adjustment = DataFeed = StockHistoricalDataClient = StockBarsRequest = None
+    TimeFrame = TimeFrameUnit = None
+    ALPACA_DATA_IMPORT_ERROR = exc
 
 # -----------------------------------------------------------------------------
 # App Layout & Theme Styling
@@ -129,6 +152,91 @@ def fetch_stock_data(symbol: str, timeframe: str):
     ticker = yf.Ticker(symbol)
     df = ticker.history(period=period, interval=interval, timeout=10)
     return df, interval
+
+
+def parse_bool(value, default):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    value = str(value).strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def get_alpaca_session_credentials():
+    """Use the credentials already connected on this Streamlit session's Trade page."""
+    try:
+        settings = st.secrets.get("alpaca", {})
+    except Exception:
+        settings = {}
+    if not hasattr(settings, "get"):
+        settings = {}
+
+    paper = parse_bool(os.getenv("ALPACA_PAPER", settings.get("paper", True)), True)
+    live_enabled = parse_bool(
+        os.getenv("ALPACA_ENABLE_LIVE_TRADING", settings.get("enable_live_trading", False)),
+        False,
+    )
+    if not paper and not live_enabled:
+        return None, None
+
+    mode = "paper" if paper else "live"
+    credentials = st.session_state.get(f"alpaca_{mode}_credentials", {})
+    if not isinstance(credentials, dict):
+        return None, None
+    return credentials.get("api_key"), credentials.get("secret_key")
+
+
+def is_valid_alpaca_symbol(symbol: str) -> bool:
+    """Alpaca stock data supports standard US equity and ETF symbols."""
+    return isinstance(symbol, str) and re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", symbol) is not None
+
+
+def fetch_alpaca_stock_data(symbol: str, timeframe: str, api_key: str, secret_key: str):
+    """Fetch adjusted equity bars from Alpaca's IEX feed using the current session's keys."""
+    interval_map = {
+        "Next 5 Mins (Scalp)": (TimeFrame.Minute, 3, "1m"),
+        "Next 15 Mins (Intraday)": (TimeFrame(5, TimeFrameUnit.Minute), 7, "5m"),
+        "Next 1 Hour (Swing)": (TimeFrame(15, TimeFrameUnit.Minute), 35, "15m"),
+        "Next Trading Day (Daily)": (TimeFrame.Day, 370, "1d"),
+    }
+    alpaca_timeframe, lookback_days, interval = interval_map[timeframe]
+    end = datetime.now(timezone.utc)
+    request = StockBarsRequest(
+        symbol_or_symbols=symbol,
+        timeframe=alpaca_timeframe,
+        start=end - timedelta(days=lookback_days),
+        end=end,
+        limit=10000,
+        adjustment=Adjustment.ALL,
+        feed=DataFeed.IEX,
+    )
+    bars = StockHistoricalDataClient(api_key, secret_key).get_stock_bars(request).df
+    if bars.empty:
+        return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]), interval
+
+    if isinstance(bars.index, pd.MultiIndex):
+        symbol_level = bars.index.names.index("symbol") if "symbol" in bars.index.names else 0
+        try:
+            bars = bars.xs(symbol, level=symbol_level, drop_level=True)
+        except KeyError:
+            return pd.DataFrame(columns=["Open", "High", "Low", "Close", "Volume"]), interval
+
+    bars = bars.rename(
+        columns={
+            "open": "Open",
+            "high": "High",
+            "low": "Low",
+            "close": "Close",
+            "volume": "Volume",
+        }
+    )
+    bars.index = pd.to_datetime(bars.index)
+    return bars[["Open", "High", "Low", "Close", "Volume"]], interval
 
 
 def build_demo_data(symbol: str, timeframe: str):
@@ -325,6 +433,7 @@ TIMEFRAME_OPTIONS = [
 ]
 st.session_state.setdefault("active_symbol", "NVDA")
 st.session_state.setdefault("active_timeframe", TIMEFRAME_OPTIONS[1])
+st.session_state.setdefault("active_data_source", "Yahoo Finance")
 if "demo_data_enabled" not in st.session_state:
     st.session_state.demo_data_enabled = st.query_params.get("demo") == "1"
 if "use_demo_toggle" not in st.session_state:
@@ -332,6 +441,7 @@ if "use_demo_toggle" not in st.session_state:
 if st.session_state.get("_trendpulse_page") != "market":
     st.session_state.ticker_input = st.session_state.active_symbol
     st.session_state.timeframe_input = st.session_state.active_timeframe
+    st.session_state.market_data_source_input = st.session_state.active_data_source
     st.session_state.use_demo_toggle = st.session_state.demo_data_enabled
 st.session_state._trendpulse_page = "market"
 
@@ -383,12 +493,44 @@ if apply_setup:
 symbol = st.session_state.active_symbol
 timeframe = st.session_state.active_timeframe
 
+alpaca_api_key, alpaca_secret_key = get_alpaca_session_credentials()
+alpaca_source_available = (
+    ALPACA_DATA_IMPORT_ERROR is None
+    and bool(alpaca_api_key and alpaca_secret_key)
+    and is_valid_alpaca_symbol(symbol)
+)
+data_source_options = ["Yahoo Finance"]
+if alpaca_source_available:
+    data_source_options.append("Alpaca (IEX)")
+if st.session_state.get("market_data_source_input") not in data_source_options:
+    st.session_state.market_data_source_input = (
+        st.session_state.active_data_source
+        if st.session_state.active_data_source in data_source_options
+        else "Yahoo Finance"
+    )
+data_source = st.sidebar.selectbox(
+    "Market data source",
+    options=data_source_options,
+    key="market_data_source_input",
+    help="Alpaca IEX requires a connected Alpaca account and is available for US stocks and ETFs.",
+)
+st.session_state.active_data_source = data_source
+if ALPACA_DATA_IMPORT_ERROR is not None:
+    st.sidebar.caption("Alpaca data is unavailable until the project dependencies are installed.")
+elif not alpaca_api_key or not alpaca_secret_key:
+    st.sidebar.caption("Connect your Alpaca account on the Trade page to enable its IEX market data.")
+elif not is_valid_alpaca_symbol(symbol):
+    st.sidebar.caption("Alpaca data supports standard US stock and ETF symbols; use Yahoo Finance for other symbols.")
+
 st.sidebar.markdown("---")
 refresh_btn = st.sidebar.button("↻ Refresh market data", type="primary", width="stretch")
-st.sidebar.markdown(
-    '<div class="sidebar-note">Quotes are provided by Yahoo Finance and may be delayed. Refresh to request the latest available bars.</div>',
-    unsafe_allow_html=True,
-)
+if st.session_state.demo_data_enabled:
+    source_note = "Synthetic demo mode is on; live market-data providers are not queried."
+elif data_source == "Alpaca (IEX)":
+    source_note = "Alpaca IEX market data uses this session's connected Alpaca account."
+else:
+    source_note = "Yahoo Finance quotes may be delayed."
+st.sidebar.markdown(f'<div class="sidebar-note">{source_note} Refresh to request the latest available bars.</div>', unsafe_allow_html=True)
 if refresh_btn:
     fetch_stock_data.clear()
 
@@ -408,6 +550,11 @@ try:
         st.info("DEMO PREVIEW · Synthetic prices for interface testing; not live market data.")
         with st.spinner("Building a sample market snapshot…"):
             raw_df, interval_used = build_demo_data(symbol, timeframe)
+    elif data_source == "Alpaca (IEX)":
+        with st.spinner(f"Loading Alpaca IEX market data for {symbol}…"):
+            raw_df, interval_used = fetch_alpaca_stock_data(
+                symbol, timeframe, alpaca_api_key, alpaca_secret_key
+            )
     else:
         with st.spinner(f"Loading market data for {symbol}…"):
             raw_df, interval_used = fetch_stock_data(symbol, timeframe)
@@ -440,8 +587,9 @@ else:
         with head_col1:
             st.markdown('<div class="eyebrow">Market overview</div>', unsafe_allow_html=True)
             st.title(symbol)
+            source_label = "Synthetic demo" if st.session_state.demo_data_enabled else data_source
             st.markdown(
-                f'<div class="section-intro">{timeframe} forecast · {interval_used} bars · '
+                f'<div class="section-intro">{timeframe} forecast · {interval_used} bars · {source_label} · '
                 f'Latest bar: {df.index[-1].strftime("%b %d, %Y · %I:%M %p %Z")}</div>',
                 unsafe_allow_html=True,
             )
