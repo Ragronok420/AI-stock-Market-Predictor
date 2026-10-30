@@ -24,6 +24,7 @@ except ImportError as exc:
     ALPACA_IMPORT_ERROR = exc
 
 st.set_page_config(page_title="TrendPulse | Alpaca Trade Desk", page_icon="⚡", layout="wide")
+st.session_state._trendpulse_page = "trade"
 st.markdown("""
 <style>
     .stApp { background: radial-gradient(ellipse at 15% 0%, rgba(20,72,86,.2), transparent 38%), #0b1020; }

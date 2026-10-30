@@ -323,12 +323,17 @@ TIMEFRAME_OPTIONS = [
     "Next 1 Hour (Swing)",
     "Next Trading Day (Daily)",
 ]
-st.session_state.setdefault("ticker_input", "NVDA")
-st.session_state.setdefault("timeframe_input", TIMEFRAME_OPTIONS[1])
 st.session_state.setdefault("active_symbol", "NVDA")
 st.session_state.setdefault("active_timeframe", TIMEFRAME_OPTIONS[1])
-if "use_demo_data" not in st.session_state:
-    st.session_state.use_demo_data = st.query_params.get("demo") == "1"
+if "demo_data_enabled" not in st.session_state:
+    st.session_state.demo_data_enabled = st.query_params.get("demo") == "1"
+if "use_demo_toggle" not in st.session_state:
+    st.session_state.use_demo_toggle = st.session_state.demo_data_enabled
+if st.session_state.get("_trendpulse_page") != "market":
+    st.session_state.ticker_input = st.session_state.active_symbol
+    st.session_state.timeframe_input = st.session_state.active_timeframe
+    st.session_state.use_demo_toggle = st.session_state.demo_data_enabled
+st.session_state._trendpulse_page = "market"
 
 st.sidebar.markdown("**Popular tickers**")
 quick_col1, quick_col2, quick_col3 = st.sidebar.columns(3)
@@ -345,9 +350,10 @@ if quick_col3.button("TSLA", width="stretch"):
 
 st.sidebar.toggle(
     "Use synthetic demo data",
-    key="use_demo_data",
+    key="use_demo_toggle",
     help="Preview the interface with generated prices. This does not use live market data.",
 )
+st.session_state.demo_data_enabled = st.session_state.use_demo_toggle
 
 with st.sidebar.form("market_setup"):
     st.text_input(
@@ -398,7 +404,7 @@ if not is_valid_symbol(symbol):
     st.stop()
 
 try:
-    if st.session_state.use_demo_data:
+    if st.session_state.demo_data_enabled:
         st.info("DEMO PREVIEW · Synthetic prices for interface testing; not live market data.")
         with st.spinner("Building a sample market snapshot…"):
             raw_df, interval_used = build_demo_data(symbol, timeframe)
