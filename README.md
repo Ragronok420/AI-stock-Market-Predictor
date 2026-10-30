@@ -12,6 +12,7 @@ TrendPulse is a real-time market trend prediction and technical analysis dashboa
 - **Dynamic Trade Planning:** Automated volatility-based Take-Profit and Stop-Loss levels computed via Average True Range (ATR).
 - **Interactive Technical Charts:** Dual-pane Plotly candlestick charts with EMAs, Bollinger Bands, and volume momentum indicators.
 - **Modern Dark UI:** Responsive card layout tailored for traders and market analysts.
+- **Alpaca Trading Desk:** Review and submit manual stock/ETF market or limit orders, inspect account balances and positions, and review open orders. TrendPulse predictions never submit orders automatically.
 
 ---
 
@@ -50,11 +51,19 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Run the Streamlit App
+### 4. Configure Alpaca
+
+Open the local `.streamlit/secrets.toml` file and enter your paper API credentials under `[alpaca.paper]`. If it is missing, copy `.streamlit/secrets.toml.example` to create it. This credentials file is ignored by Git; the example template is safe to track.
+
+To enable live trading, add your live API credentials in the `[alpaca.live]` section, then explicitly set `paper = false` and `enable_live_trading = true` in `[alpaca]`. The Trade page also requires an order preview, a confirmation checkbox, and typing `LIVE` before it will submit a live order. Never paste API keys into source code or commit them.
+
+### 5. Run the Streamlit App
 ```bash
 streamlit run app.py
 ```
 Open **`http://localhost:8501`** in your browser.
+
+Use the **Trade** page in Streamlit's page navigation to view your Alpaca account and place manual orders. Paper and live accounts use separate credentials. This integration is for a personal, locally run app; do not expose personal API keys through a public deployment.
 
 ---
 

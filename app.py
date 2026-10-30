@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import re
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from sklearn.ensemble import RandomForestClassifier
@@ -16,44 +17,97 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom modern CSS for cards, badges, and clean spacing
+# A calmer visual hierarchy for the dashboard and its controls.
 st.markdown("""
 <style>
-    .metric-card {
-        background-color: #1e222d;
-        border-radius: 12px;
-        padding: 18px;
-        border: 1px solid #2d3343;
-        margin-bottom: 12px;
+    :root {
+        --tp-bg: #0b1020;
+        --tp-border: rgba(148, 163, 184, .16);
+        --tp-muted: #91a0b8;
+        --tp-accent: #67e8d2;
+    }
+    .stApp {
+        background: radial-gradient(ellipse at 15% 0%, rgba(20, 72, 86, .24), transparent 38%), var(--tp-bg);
+    }
+    [data-testid="stSidebar"] {
+        background: #0e1627;
+        border-right: 1px solid var(--tp-border);
+    }
+    .block-container { padding-top: 2rem; padding-bottom: 2.5rem; max-width: 1440px; }
+    h1, h2, h3 { letter-spacing: -.035em; }
+    [data-testid="stMetric"] {
+        background: linear-gradient(145deg, rgba(20, 31, 51, .9), rgba(15, 24, 40, .9));
+        border: 1px solid var(--tp-border);
+        border-radius: 14px;
+        padding: 16px 18px;
+    }
+    [data-testid="stMetricLabel"] { color: var(--tp-muted); }
+    [data-testid="stMetricValue"] { font-weight: 650; }
+    .eyebrow {
+        color: var(--tp-accent);
+        font-size: .73rem;
+        font-weight: 700;
+        letter-spacing: .13em;
+        text-transform: uppercase;
+        margin-bottom: .35rem;
+    }
+    .signal-rise, .signal-fall, .signal-neutral {
+        color: #f8fafc;
+        padding: 22px 24px;
+        border-radius: 16px;
+        border: 1px solid rgba(255,255,255,.12);
+        text-align: left;
+        font-weight: 700;
+        font-size: clamp(1.1rem, 2vw, 1.5rem);
+        line-height: 1.35;
     }
     .signal-rise {
-        background: linear-gradient(135deg, #0e5a32 0%, #16a34a 100%);
-        color: white;
-        padding: 18px;
-        border-radius: 14px;
-        text-align: center;
-        font-weight: 700;
-        font-size: 24px;
-        box-shadow: 0 4px 14px rgba(22, 163, 74, 0.3);
+        background: linear-gradient(120deg, rgba(5, 82, 66, .96), rgba(15, 118, 89, .74));
+        box-shadow: 0 12px 32px rgba(16, 185, 129, .12);
     }
     .signal-fall {
-        background: linear-gradient(135deg, #7f1d1d 0%, #dc2626 100%);
-        color: white;
-        padding: 18px;
-        border-radius: 14px;
-        text-align: center;
-        font-weight: 700;
-        font-size: 24px;
-        box-shadow: 0 4px 14px rgba(220, 38, 38, 0.3);
+        background: linear-gradient(120deg, rgba(127, 29, 46, .96), rgba(190, 45, 65, .74));
+        box-shadow: 0 12px 32px rgba(239, 68, 68, .12);
     }
-    .signal-neutral {
-        background: linear-gradient(135deg, #854d0e 0%, #d97706 100%);
-        color: white;
-        padding: 18px;
+    .signal-neutral { background: linear-gradient(120deg, rgba(115, 76, 20, .96), rgba(180, 113, 25, .74)); }
+    .signal-label {
+        display: block;
+        font-size: .72rem;
+        letter-spacing: .12em;
+        opacity: .78;
+        margin-bottom: .4rem;
+    }
+    .signal-rise small, .signal-fall small, .signal-neutral small {
+        display: block;
+        font-size: .86rem;
+        font-weight: 450;
+        opacity: .88;
+        margin-top: .45rem;
+    }
+    .section-intro {
+        color: var(--tp-muted);
+        margin-top: -.45rem;
+        margin-bottom: 1.15rem;
+        font-size: .93rem;
+    }
+    .sidebar-note { color: var(--tp-muted); font-size: .82rem; line-height: 1.5; }
+    .brand-mark {
+        color: var(--tp-accent);
+        font-size: .77rem;
+        font-weight: 750;
+        letter-spacing: .15em;
+        text-transform: uppercase;
+    }
+    .stButton > button { border-radius: 10px; min-height: 2.7rem; }
+    div[data-testid="stExpander"] {
+        border: 1px solid var(--tp-border);
         border-radius: 14px;
-        text-align: center;
-        font-weight: 700;
-        font-size: 24px;
+        background: rgba(17, 26, 45, .58);
+    }
+    @media (max-width: 700px) {
+        .block-container { padding-top: 1.25rem; }
+        [data-testid="stMetric"] { padding: 12px; }
+        .signal-rise, .signal-fall, .signal-neutral { padding: 18px; }
     }
 </style>
 """, unsafe_allow_html=True)
@@ -62,7 +116,7 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 # Data Processing & Technical Engine
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=30, show_spinner=False)
+@st.cache_data(ttl=30, max_entries=32, show_spinner=False)
 def fetch_stock_data(symbol: str, timeframe: str):
     """Fetches high-frequency intraday/daily bars depending on user timeframe."""
     period_map = {
@@ -73,8 +127,17 @@ def fetch_stock_data(symbol: str, timeframe: str):
     }
     period, interval = period_map[timeframe]
     ticker = yf.Ticker(symbol)
-    df = ticker.history(period=period, interval=interval)
+    df = ticker.history(period=period, interval=interval, timeout=10)
     return df, interval
+
+
+def is_valid_symbol(symbol: str) -> bool:
+    """Allow common Yahoo Finance symbols while rejecting markup and URL syntax."""
+    return (
+        isinstance(symbol, str)
+        and len(symbol) <= 32
+        and re.fullmatch(r"\^?[A-Z0-9][A-Z0-9.-]*(?:=[A-Z])?", symbol) is not None
+    )
 
 
 def build_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -212,52 +275,107 @@ def predict_direction(df: pd.DataFrame):
 # -----------------------------------------------------------------------------
 # User Interface (Sidebar)
 # -----------------------------------------------------------------------------
-st.sidebar.title("⚡ TrendPulse AI")
+st.sidebar.markdown('<div class="brand-mark">⚡ TrendPulse</div>', unsafe_allow_html=True)
+st.sidebar.page_link("pages/Trade.py", label="Open Alpaca trade desk")
+st.sidebar.markdown("### Market setup")
+st.sidebar.markdown(
+    '<div class="sidebar-note">Choose a ticker and a forecast horizon to build your market snapshot.</div>',
+    unsafe_allow_html=True,
+)
+st.sidebar.write("")
 
-# Quick selector buttons
-st.sidebar.markdown("**Quick Select Market Leaders:**")
+TIMEFRAME_OPTIONS = [
+    "Next 5 Mins (Scalp)",
+    "Next 15 Mins (Intraday)",
+    "Next 1 Hour (Swing)",
+    "Next Trading Day (Daily)",
+]
+st.session_state.setdefault("ticker_input", "NVDA")
+st.session_state.setdefault("timeframe_input", TIMEFRAME_OPTIONS[1])
+st.session_state.setdefault("active_symbol", "NVDA")
+st.session_state.setdefault("active_timeframe", TIMEFRAME_OPTIONS[1])
+
+st.sidebar.markdown("**Popular tickers**")
 quick_col1, quick_col2, quick_col3 = st.sidebar.columns(3)
-
-if "ticker_input" not in st.session_state:
-    st.session_state.ticker_input = "NVDA"
 
 if quick_col1.button("NVDA"):
     st.session_state.ticker_input = "NVDA"
+    st.session_state.active_symbol = "NVDA"
 if quick_col2.button("AAPL"):
     st.session_state.ticker_input = "AAPL"
+    st.session_state.active_symbol = "AAPL"
 if quick_col3.button("TSLA"):
     st.session_state.ticker_input = "TSLA"
+    st.session_state.active_symbol = "TSLA"
 
-symbol = st.sidebar.text_input("Or enter custom symbol:", key="ticker_input").upper()
+with st.sidebar.form("market_setup"):
+    st.text_input(
+        "Ticker symbol",
+        key="ticker_input",
+        max_chars=32,
+        placeholder="e.g. NVDA or BTC-USD",
+        help="Enter a stock, ETF, or a Yahoo Finance symbol such as BTC-USD.",
+    )
+    st.selectbox(
+        "Forecast horizon",
+        options=TIMEFRAME_OPTIONS,
+        key="timeframe_input",
+        help="The forecast uses the next available bar for the selected horizon.",
+    )
+    apply_setup = st.form_submit_button("Update market view", use_container_width=True)
 
-timeframe = st.sidebar.selectbox(
-    "Prediction Horizon",
-    options=[
-        "Next 5 Mins (Scalp)",
-        "Next 15 Mins (Intraday)",
-        "Next 1 Hour (Swing)",
-        "Next Trading Day (Daily)"
-    ],
-    index=1
-)
+if apply_setup:
+    requested_symbol = st.session_state.ticker_input.strip().upper()
+    if is_valid_symbol(requested_symbol):
+        st.session_state.active_symbol = requested_symbol
+        st.session_state.active_timeframe = st.session_state.timeframe_input
+    else:
+        st.sidebar.error("Enter a valid ticker using letters, numbers, dots, hyphens, or a leading ^ / ending =X.")
+        st.stop()
+
+symbol = st.session_state.active_symbol
+timeframe = st.session_state.active_timeframe
 
 st.sidebar.markdown("---")
-refresh_btn = st.sidebar.button("🔄 Refresh Real-Time Data")
+refresh_btn = st.sidebar.button("↻ Refresh market data", type="primary", use_container_width=True)
+st.sidebar.markdown(
+    '<div class="sidebar-note">Quotes are provided by Yahoo Finance and may be delayed. Refresh to request the latest available bars.</div>',
+    unsafe_allow_html=True,
+)
+if refresh_btn:
+    fetch_stock_data.clear()
 
 
 # -----------------------------------------------------------------------------
 # Main Application Dashboard
 # -----------------------------------------------------------------------------
-raw_df, interval_used = fetch_stock_data(symbol, timeframe)
+if not symbol:
+    st.info("Enter a ticker symbol in the sidebar to start your market snapshot.")
+    st.stop()
+if not is_valid_symbol(symbol):
+    st.error("The ticker format is invalid. Use letters, numbers, dots, hyphens, or a leading ^ / ending =X.")
+    st.stop()
+
+try:
+    with st.spinner(f"Loading market data for {symbol}…"):
+        raw_df, interval_used = fetch_stock_data(symbol, timeframe)
+except Exception as exc:
+    st.error(f"We couldn't load market data for **{symbol}**.")
+    st.caption("Check the ticker spelling and your internet connection, then try refreshing the data.")
+    with st.expander("Data provider details"):
+        st.code(str(exc))
+    st.stop()
 
 if raw_df.empty or len(raw_df) < 30:
-    st.error(f"Could not load sufficient market data for '{symbol}'. Please verify the symbol or try during market hours.")
+    st.warning(f"There isn't enough recent market data for **{symbol}** to create a reliable snapshot.")
+    st.caption("Check the ticker symbol, try a longer forecast horizon, or try again during market hours.")
 else:
     df = build_indicators(raw_df)
     results = predict_direction(df)
 
     if results is None:
-        st.warning(f"Not enough data points ({len(df)}) to generate predictions. Please try a different timeframe.")
+        st.warning(f"Only {len(df)} usable bars are available for **{symbol}** right now.")
+        st.caption("Try a longer forecast horizon or check again when more market data is available.")
     else:
         latest = results["latest_bar"]
         cur_price = latest["Close"]
@@ -265,82 +383,118 @@ else:
         price_diff = cur_price - prev_close
         pct_diff = (price_diff / prev_close) * 100
 
-        # Header section
-        head_col1, head_col2 = st.columns([2, 1])
+        # Market overview
+        head_col1, head_col2 = st.columns([1.7, 1])
         with head_col1:
-            st.title(f"{symbol} Real-Time Market Trend")
-            st.caption(f"Timeframe: **{timeframe}** | Bar interval: **{interval_used}**")
+            st.markdown('<div class="eyebrow">Market overview</div>', unsafe_allow_html=True)
+            st.title(symbol)
+            st.markdown(
+                f'<div class="section-intro">{timeframe} forecast · {interval_used} bars · '
+                f'Latest bar: {df.index[-1].strftime("%b %d, %Y · %I:%M %p %Z")}</div>',
+                unsafe_allow_html=True,
+            )
         with head_col2:
             st.metric(
-                label="Current Price",
+                label="Latest bar close",
                 value=f"${cur_price:,.2f}",
-                delta=f"{price_diff:+,.2f} ({pct_diff:+.2f}%)"
+                delta=f"{price_diff:+,.2f} ({pct_diff:+.2f}%) vs prior bar",
+                help="Change from the previous available bar, not the previous day's close.",
             )
-
-        st.markdown("---")
 
         # PREDICTION CARD (HERO ELEMENT)
         conf = results["composite_confidence"]
         atr = results["atr"] if not np.isnan(results["atr"]) else cur_price * 0.01
 
-        col_pred, col_levels = st.columns([1.5, 1.5])
+        col_pred, col_levels = st.columns([1.15, 1])
 
         with col_pred:
             if conf >= 0.56:
-                direction_text = "🚀 PREDICTION: EXPECTED TO RISE"
+                direction_text = "Expected to rise"
                 style_class = "signal-rise"
                 confidence_pct = conf * 100
                 bias = "BULLISH"
             elif conf <= 0.44:
-                direction_text = "🔻 PREDICTION: EXPECTED TO FALL"
+                direction_text = "Expected to fall"
                 style_class = "signal-fall"
                 confidence_pct = (1.0 - conf) * 100
                 bias = "BEARISH"
             else:
-                direction_text = "⚖️ PREDICTION: CONSOLIDATING / NEUTRAL"
+                direction_text = "Neutral outlook"
                 style_class = "signal-neutral"
                 confidence_pct = 50.0
                 bias = "NEUTRAL"
 
-            st.markdown(f'<div class="{style_class}">{direction_text}</div>', unsafe_allow_html=True)
-            st.write("")
-            st.write(f"**AI Confidence Score:** `{confidence_pct:.1f}%`")
+            st.markdown(
+                f'<div class="{style_class}"><span class="signal-label">NEXT BAR MODEL OUTLOOK</span>'
+                f'{direction_text}<small>Statistical estimate based on recent price and volume patterns.</small></div>',
+                unsafe_allow_html=True,
+            )
+            st.metric(
+                "Model confidence",
+                f"{confidence_pct:.1f}%",
+                help="A blend of the model probability and technical indicator agreement. It is not a guarantee.",
+            )
             st.progress(confidence_pct / 100)
 
         with col_levels:
-            st.markdown("### 🎯 Suggested Trading Levels")
-            # ATR-based automated Take-Profit and Stop-Loss
+            st.markdown("### ATR-based reference levels")
+            st.markdown(
+                '<div class="section-intro">Volatility estimates around the latest bar close.</div>',
+                unsafe_allow_html=True,
+            )
             if bias == "BULLISH":
                 target = cur_price + (1.5 * atr)
                 stop = cur_price - (1.0 * atr)
-            else:
+            elif bias == "BEARISH":
                 target = cur_price - (1.5 * atr)
                 stop = cur_price + (1.0 * atr)
+            if bias == "NEUTRAL":
+                st.info("The outlook is neutral, so no directional target or stop estimate is shown.")
+            else:
+                l_col1, l_col2 = st.columns(2)
+                l_col1.metric(
+                    "Target estimate",
+                    f"${target:,.2f}",
+                    delta=f"{target - cur_price:+,.2f}",
+                    help="A volatility-based reference at 1.5 × ATR in the model's indicated direction.",
+                )
+                l_col2.metric(
+                    "Stop estimate",
+                    f"${stop:,.2f}",
+                    delta=f"{stop - cur_price:+,.2f}",
+                    delta_color="inverse",
+                    help="A volatility-based reference at 1 × ATR opposite the indicated direction.",
+                )
+            st.caption("Illustrative estimates based on ATR; they are not trading recommendations.")
 
-            l_col1, l_col2 = st.columns(2)
-            l_col1.metric("Target (Take Profit)", f"${target:.2f}")
-            l_col2.metric("Safety (Stop Loss)", f"${stop:.2f}")
-            st.caption("Levels are dynamically calculated using market volatility (ATR).")
-
-        st.markdown("---")
+        st.markdown("#### Technical snapshot")
+        snap1, snap2, snap3, snap4 = st.columns(4)
+        snap1.metric("RSI (14)", f"{latest['RSI']:.1f}", help="Momentum indicator; readings above 70 or below 30 are often considered extreme.")
+        snap2.metric("Short-term trend", "Upward" if latest["EMA_9"] > latest["EMA_21"] else "Downward", help="Compares the 9-period EMA with the 21-period EMA.")
+        snap3.metric("MACD momentum", "Positive" if latest["MACD_Hist"] > 0 else "Negative")
+        snap4.metric("Volume vs average", f"{latest['Vol_Surge']:.1f}×", help="Latest volume divided by its 20-bar average.")
 
         # WHY THIS PREDICTION? (EXPLAINABLE AI)
-        with st.expander("🔍 **Why did the model make this prediction? (Click to view breakdown)**", expanded=True):
+        with st.expander("How was this outlook formed?", expanded=False):
             col_why1, col_why2 = st.columns([2, 1])
             with col_why1:
                 for item in results["reasons"]:
                     st.markdown(item)
             with col_why2:
-                st.markdown("**Technical Snapshot**")
-                st.write(f"• **RSI (14):** `{latest['RSI']:.1f}`")
-                st.write(f"• **EMA 9:** `${latest['EMA_9']:.2f}`")
-                st.write(f"• **EMA 21:** `${latest['EMA_21']:.2f}`")
-                st.write(f"• **Volume Surge:** `{latest['Vol_Surge']:.1f}x`")
+                st.markdown("**Model inputs**")
+                st.write(f"EMA 9: `${latest['EMA_9']:.2f}`")
+                st.write(f"EMA 21: `${latest['EMA_21']:.2f}`")
+                st.write(f"MACD histogram: `{latest['MACD_Hist']:.4f}`")
 
         # -------------------------------------------------------------------------
-        # Visual Interactive Chart
+        # Interactive chart
         # -------------------------------------------------------------------------
-        st.subheader("📊 Interactive Candlestick & Trend Chart")
+        st.markdown("### Price chart")
+        st.markdown(
+            '<div class="section-intro">Explore recent candles, moving averages, Bollinger Bands, and volume. '
+            'Hover over the chart for exact values; click legend items to show or hide indicators.</div>',
+            unsafe_allow_html=True,
+        )
 
         fig = make_subplots(
             rows=2, cols=1,
@@ -355,7 +509,11 @@ else:
             x=df.index,
             open=df["Open"], high=df["High"],
             low=df["Low"], close=df["Close"],
-            name="Price"
+            name="Price",
+            increasing_line_color="#34d399",
+            decreasing_line_color="#fb7185",
+            increasing_fillcolor="#34d399",
+            decreasing_fillcolor="#fb7185",
         ), row=1, col=1)
 
         # 9 and 21 EMAs
@@ -371,12 +529,19 @@ else:
         fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume", marker_color=colors), row=2, col=1)
 
         fig.update_layout(
-            height=550,
+            height=570,
             template="plotly_dark",
             xaxis_rangeslider_visible=False,
-            margin=dict(l=20, r=20, t=30, b=20)
+            margin=dict(l=20, r=20, t=45, b=20),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(11,16,32,.35)",
+            font=dict(color="#dbe4f0", family="sans-serif"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+            hovermode="x unified",
         )
-        st.plotly_chart(fig, use_container_width=True)
+        fig.update_xaxes(showgrid=False, zeroline=False)
+        fig.update_yaxes(gridcolor="rgba(148,163,184,.12)", zeroline=False)
+        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
 
         # Disclaimer Footer
-        st.caption("⚠️ **Educational & Informational Tool Only:** Financial markets are inherently uncertain. This tool uses historical probability and statistical indicators. Never risk capital based solely on automated signals.")
+        st.caption("For education and research only. Market predictions are uncertain and are not financial advice. Review your own risk before making investment decisions.")
