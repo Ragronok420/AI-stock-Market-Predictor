@@ -53,9 +53,9 @@ pip install -r requirements.txt
 
 ### 4. Configure Alpaca
 
-Open the local `.streamlit/secrets.toml` file and enter your paper API credentials under `[alpaca.paper]`. If it is missing, copy `.streamlit/secrets.toml.example` to create it. This credentials file is ignored by Git; the example template is safe to track.
+Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` if you need to configure the account mode. The Trade page asks each browser session for its own Alpaca API key and secret. The fields are masked; credentials are held in that Streamlit session's server-side memory and are not written to disk, the repository, or shared with another session. Each person must create their own key pair in Alpaca. TrendPulse does not generate broker keys.
 
-To enable live trading, add your live API credentials in the `[alpaca.live]` section, then explicitly set `paper = false` and `enable_live_trading = true` in `[alpaca]`. The Trade page also requires an order preview, a confirmation checkbox, and typing `LIVE` before it will submit a live order. Never paste API keys into source code or commit them.
+Paper mode is the default. To enable live trading, explicitly set `paper = false` and `enable_live_trading = true` under `[alpaca]`, then connect using your own live key pair. The Trade page also requires an order preview, a confirmation checkbox, and typing `LIVE` before it will submit a live order. Never paste API keys into source code or commit them. The app has no sign-in system, so these credentials are isolated per browser session rather than bound to a verified identity; use authentication and HTTPS before hosting it for multiple people.
 
 ### 5. Run the Streamlit App
 ```bash
@@ -64,6 +64,16 @@ streamlit run app.py
 Open **`http://localhost:8501`** in your browser.
 
 Use the **Trade** page in Streamlit's page navigation to view your Alpaca account and place manual orders. Paper and live accounts use separate credentials. This integration is for a personal, locally run app; do not expose personal API keys through a public deployment.
+
+## 🧪 Try the interface safely
+
+Run the UI smoke tests with:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+These tests use generated market data and a fake Alpaca client. They exercise ticker switching and the paper-order review/confirmation flow without contacting a market-data service or submitting a broker order. For an offline visual walkthrough, run the app and turn on **Use synthetic demo data** in the sidebar (or open `http://localhost:8501/?demo=1`). Then switch tickers and forecast horizons; the candlestick chart supports hover, zoom, and toggling indicators from its legend. The Trade page needs paper API credentials to show a real Alpaca paper account.
 
 ---
 

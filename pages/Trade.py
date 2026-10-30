@@ -5,9 +5,15 @@ from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 import streamlit as st
-from alpaca.trading.client import TradingClient
-from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
-from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest
+
+try:
+    from alpaca.trading.client import TradingClient
+    from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
+    from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest
+    ALPACA_IMPORT_ERROR = None
+except ImportError as exc:
+    TradingClient = None
+    ALPACA_IMPORT_ERROR = exc
 
 st.set_page_config(page_title="TrendPulse | Alpaca Trade Desk", page_icon="⚡", layout="wide")
 st.markdown("""
@@ -18,6 +24,12 @@ st.markdown("""
     .trade-eyebrow { color: #67e8d2; font-size: .75rem; font-weight: 700; letter-spacing: .14em; text-transform: uppercase; }
 </style>
 """, unsafe_allow_html=True)
+
+if ALPACA_IMPORT_ERROR is not None:
+    st.warning("The Alpaca trade desk needs the Alpaca Python package before it can connect.")
+    st.code("python -m pip install -r requirements.txt", language="powershell")
+    st.caption("You can still use the market dashboard while the broker package is unavailable.")
+    st.stop()
 
 
 def as_bool(value, default):
@@ -47,13 +59,21 @@ def alpaca_settings():
         False,
     )
     mode = "paper" if paper else "live"
-    mode_settings = root.get(mode, {})
-    if not hasattr(mode_settings, "get"):
-        mode_settings = {}
-    prefix = f"ALPACA_{mode.upper()}"
-    api_key = os.getenv(f"{prefix}_API_KEY") or mode_settings.get("api_key")
-    secret_key = os.getenv(f"{prefix}_SECRET_KEY") or mode_settings.get("secret_key")
+    credentials = st.session_state.get(f"alpaca_{mode}_credentials", {})
+    if not isinstance(credentials, dict):
+        credentials = {}
+    api_key = credentials.get("api_key")
+    secret_key = credentials.get("secret_key")
     return paper, live_enabled, api_key, secret_key
+
+
+def disconnect_alpaca_session(mode):
+    st.session_state.pop(f"alpaca_{mode}_credentials", None)
+    version_key = f"alpaca_{mode}_form_version"
+    version = st.session_state.get(version_key, 0)
+    st.session_state.pop(f"alpaca_{mode}_api_key_{version}", None)
+    st.session_state.pop(f"alpaca_{mode}_secret_key_{version}", None)
+    st.session_state[version_key] = version + 1
 
 
 def enum_text(value):
@@ -177,9 +197,60 @@ if not paper and not live_enabled:
     st.caption("Set `paper = false` and `enable_live_trading = true` under `[alpaca]` in your local secrets file to enable it.")
     st.stop()
 
+mode = "paper" if paper else "live"
+mode_title = "Paper" if paper else "Live"
+connected_for_session = bool(api_key and secret_key)
+with st.expander(
+    f"{mode_title} account connection" if not connected_for_session else f"Manage {mode_title.lower()} connection",
+    expanded=not connected_for_session,
+):
+    st.caption(
+        f"Enter your own Alpaca {mode_title.lower()} API key pair. The fields are masked, and credentials stay in this "
+        "Streamlit browser session's server-side memory; they are not written to disk or shared with other sessions."
+    )
+    form_version_key = f"alpaca_{mode}_form_version"
+    form_version = st.session_state.get(form_version_key, 0)
+    with st.form(f"alpaca_{mode}_credentials_form_{form_version}"):
+        user_api_key = st.text_input(
+            f"{mode_title} API key",
+            type="password",
+            key=f"alpaca_{mode}_api_key_{form_version}",
+            placeholder="Paste your personal API key",
+        )
+        user_secret_key = st.text_input(
+            f"{mode_title} API secret",
+            type="password",
+            key=f"alpaca_{mode}_secret_key_{form_version}",
+            placeholder="Paste your personal API secret",
+        )
+        connect_clicked = st.form_submit_button(
+            f"Connect {mode_title.lower()} account",
+            type="primary",
+            width="stretch",
+        )
+
+    if connect_clicked:
+        if not user_api_key.strip() or not user_secret_key.strip():
+            st.error("Enter both your API key and API secret to connect.")
+        else:
+            st.session_state[f"alpaca_{mode}_credentials"] = {
+                "api_key": user_api_key.strip(),
+                "secret_key": user_secret_key.strip(),
+            }
+            st.session_state[form_version_key] = form_version + 1
+            st.rerun()
+
+    if connected_for_session:
+        st.caption("Connected credentials belong to this browser session.")
+        st.button(
+            "Disconnect this session",
+            key=f"disconnect_alpaca_{mode}",
+            on_click=disconnect_alpaca_session,
+            args=(mode,),
+        )
+
 if not api_key or not secret_key:
-    st.warning("Alpaca credentials are not configured for this mode.")
-    st.markdown("Copy `.streamlit/secrets.toml.example` to `.streamlit/secrets.toml` and add the matching paper or live API keys. Keep the secrets file private.")
+    st.info(f"Connect your own Alpaca {mode_title.lower()} account above to view balances and the order ticket.")
     st.stop()
 
 client = TradingClient(api_key, secret_key, paper=paper)
@@ -219,7 +290,7 @@ with st.form("alpaca_order_ticket"):
     with qty_col:
         quantity_value = st.number_input("Shares", min_value=0.001, value=1.0, step=0.001, format="%.3f")
     limit_price_value = st.text_input("Limit price (USD; used for limit orders)", placeholder="For example: 150.00")
-    review_clicked = st.form_submit_button("Review order", type="primary", use_container_width=True)
+    review_clicked = st.form_submit_button("Review order", type="primary", width="stretch")
 
 if review_clicked:
     st.session_state.pop("alpaca_pending_order", None)
@@ -269,7 +340,7 @@ if pending:
 
     if not paper and confirmed and live_word != "LIVE":
         st.caption("Type LIVE exactly to enable the real-money submit button.")
-    if st.button(submit_label, type="primary", disabled=not ready_to_submit, use_container_width=True):
+    if st.button(submit_label, type="primary", disabled=not ready_to_submit, width="stretch"):
         try:
             # Refresh account permissions and sellable quantity immediately before submission.
             current_account = client.get_account()
@@ -311,7 +382,7 @@ with portfolio_tab:
                 }
                 for position in positions
             ]
-            st.dataframe(pd.DataFrame(position_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(position_rows), hide_index=True, width="stretch")
         else:
             st.caption("No open positions.")
     except Exception as exc:
@@ -336,7 +407,7 @@ with orders_tab:
                 }
                 for order in open_orders
             ]
-            st.dataframe(pd.DataFrame(order_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(order_rows), hide_index=True, width="stretch")
         else:
             st.caption("No open orders.")
     except Exception as exc:

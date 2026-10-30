@@ -131,6 +131,39 @@ def fetch_stock_data(symbol: str, timeframe: str):
     return df, interval
 
 
+def build_demo_data(symbol: str, timeframe: str):
+    """Build synthetic bars for a clearly labeled, offline UI preview."""
+    interval_map = {
+        "Next 5 Mins (Scalp)": "1m",
+        "Next 15 Mins (Intraday)": "5m",
+        "Next 1 Hour (Swing)": "15m",
+        "Next Trading Day (Daily)": "1d",
+    }
+    interval = interval_map[timeframe]
+    seed = sum((index + 1) * ord(char) for index, char in enumerate(f"{symbol}:{timeframe}"))
+    rng = np.random.default_rng(seed)
+    count = 180
+    if interval == "1d":
+        index = pd.bdate_range(end=pd.Timestamp.now(tz="UTC").normalize(), periods=count)
+    else:
+        minutes = int(interval[:-1])
+        index = pd.date_range(
+            end=pd.Timestamp.now(tz="UTC").floor("min"),
+            periods=count,
+            freq=f"{minutes}min",
+        )
+
+    close = 150 * np.exp(np.cumsum(rng.normal(0.0001, 0.004, count)))
+    open_price = np.r_[close[0], close[:-1]] * (1 + rng.normal(0, 0.0015, count))
+    high = np.maximum(open_price, close) * (1 + rng.uniform(0.0005, 0.004, count))
+    low = np.minimum(open_price, close) * (1 - rng.uniform(0.0005, 0.004, count))
+    volume = rng.integers(100_000, 2_000_000, count)
+    return pd.DataFrame(
+        {"Open": open_price, "High": high, "Low": low, "Close": close, "Volume": volume},
+        index=index,
+    ), interval
+
+
 def is_valid_symbol(symbol: str) -> bool:
     """Allow common Yahoo Finance symbols while rejecting markup and URL syntax."""
     return (
@@ -294,19 +327,27 @@ st.session_state.setdefault("ticker_input", "NVDA")
 st.session_state.setdefault("timeframe_input", TIMEFRAME_OPTIONS[1])
 st.session_state.setdefault("active_symbol", "NVDA")
 st.session_state.setdefault("active_timeframe", TIMEFRAME_OPTIONS[1])
+if "use_demo_data" not in st.session_state:
+    st.session_state.use_demo_data = st.query_params.get("demo") == "1"
 
 st.sidebar.markdown("**Popular tickers**")
 quick_col1, quick_col2, quick_col3 = st.sidebar.columns(3)
 
-if quick_col1.button("NVDA"):
+if quick_col1.button("NVDA", width="stretch"):
     st.session_state.ticker_input = "NVDA"
     st.session_state.active_symbol = "NVDA"
-if quick_col2.button("AAPL"):
+if quick_col2.button("AAPL", width="stretch"):
     st.session_state.ticker_input = "AAPL"
     st.session_state.active_symbol = "AAPL"
-if quick_col3.button("TSLA"):
+if quick_col3.button("TSLA", width="stretch"):
     st.session_state.ticker_input = "TSLA"
     st.session_state.active_symbol = "TSLA"
+
+st.sidebar.toggle(
+    "Use synthetic demo data",
+    key="use_demo_data",
+    help="Preview the interface with generated prices. This does not use live market data.",
+)
 
 with st.sidebar.form("market_setup"):
     st.text_input(
@@ -322,7 +363,7 @@ with st.sidebar.form("market_setup"):
         key="timeframe_input",
         help="The forecast uses the next available bar for the selected horizon.",
     )
-    apply_setup = st.form_submit_button("Update market view", use_container_width=True)
+    apply_setup = st.form_submit_button("Update market view", width="stretch")
 
 if apply_setup:
     requested_symbol = st.session_state.ticker_input.strip().upper()
@@ -337,7 +378,7 @@ symbol = st.session_state.active_symbol
 timeframe = st.session_state.active_timeframe
 
 st.sidebar.markdown("---")
-refresh_btn = st.sidebar.button("↻ Refresh market data", type="primary", use_container_width=True)
+refresh_btn = st.sidebar.button("↻ Refresh market data", type="primary", width="stretch")
 st.sidebar.markdown(
     '<div class="sidebar-note">Quotes are provided by Yahoo Finance and may be delayed. Refresh to request the latest available bars.</div>',
     unsafe_allow_html=True,
@@ -357,8 +398,13 @@ if not is_valid_symbol(symbol):
     st.stop()
 
 try:
-    with st.spinner(f"Loading market data for {symbol}…"):
-        raw_df, interval_used = fetch_stock_data(symbol, timeframe)
+    if st.session_state.use_demo_data:
+        st.info("DEMO PREVIEW · Synthetic prices for interface testing; not live market data.")
+        with st.spinner("Building a sample market snapshot…"):
+            raw_df, interval_used = build_demo_data(symbol, timeframe)
+    else:
+        with st.spinner(f"Loading market data for {symbol}…"):
+            raw_df, interval_used = fetch_stock_data(symbol, timeframe)
 except Exception as exc:
     st.error(f"We couldn't load market data for **{symbol}**.")
     st.caption("Check the ticker spelling and your internet connection, then try refreshing the data.")
@@ -541,7 +587,7 @@ else:
         )
         fig.update_xaxes(showgrid=False, zeroline=False)
         fig.update_yaxes(gridcolor="rgba(148,163,184,.12)", zeroline=False)
-        st.plotly_chart(fig, use_container_width=True, config={"displaylogo": False, "scrollZoom": True})
+        st.plotly_chart(fig, width="stretch", config={"displaylogo": False, "scrollZoom": True})
 
         # Disclaimer Footer
         st.caption("For education and research only. Market predictions are uncertain and are not financial advice. Review your own risk before making investment decisions.")
