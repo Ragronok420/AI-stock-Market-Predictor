@@ -12,7 +12,7 @@ TrendPulse is a real-time market trend prediction and technical analysis dashboa
 - **Dynamic Trade Planning:** Automated volatility-based Take-Profit and Stop-Loss levels computed via Average True Range (ATR).
 - **Interactive Technical Charts:** Dual-pane Plotly candlestick charts with EMAs, Bollinger Bands, and volume momentum indicators.
 - **Modern Dark UI:** Responsive card layout tailored for traders and market analysts.
-- **Alpaca Trading Desk:** Uses Alpaca's `alpaca-py` SDK to review and submit manual stock/ETF market or limit orders, inspect account balances and positions, and review open orders. TrendPulse predictions never submit orders automatically.
+- **Alpaca Trading Desk:** Uses Alpaca's `alpaca-py` SDK to review and submit manual stock/ETF market or limit orders, including short sells and buy-to-cover orders when the account and asset allow them. It also displays account balances, long/short positions, and open orders. TrendPulse predictions never submit orders automatically.
 
 ---
 
@@ -56,6 +56,8 @@ pip install -r requirements.txt
 Copy `.env.example` to `.env` to configure the account mode. `.env` is ignored by Git. The Trade page asks each browser session for its own Alpaca API key and secret. The fields are masked; credentials are held in that Streamlit session's server-side memory and are not written to disk, the repository, or shared with another session. Each person must create their own key pair in Alpaca. TrendPulse does not generate broker keys. When connected, the market dashboard offers Alpaca IEX bars for US stocks and ETFs; Yahoo Finance remains the default for other tickers and when no Alpaca account is connected. The pinned `alpaca-py` dependency is installed with `pip install -r requirements.txt`.
 
 Paper mode is the default. To enable live trading, explicitly set `ALPACA_PAPER=false` and `ALPACA_ENABLE_LIVE_TRADING=true` in `.env`, then connect using your own live key pair. The Trade page also requires an order preview, a confirmation checkbox, and typing `LIVE` before it will submit a live order. Never paste API keys into source code or commit them. The app has no sign-in system, so these credentials are isolated per browser session rather than bound to a verified identity; use authentication and HTTPS before hosting it for multiple people.
+
+Short sales require Alpaca to enable shorting on the account and confirm the stock is easy to borrow. The ticket does not request hard-to-borrow locates. Short positions can lose more than the initial proceeds and may incur borrow costs.
 
 ### 5. Run the Streamlit App
 ```bash

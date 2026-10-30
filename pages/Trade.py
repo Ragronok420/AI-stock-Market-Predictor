@@ -1,8 +1,11 @@
 import os
 import re
 import uuid
+import json
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from urllib.parse import quote
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import streamlit as st
@@ -18,9 +21,14 @@ try:
     from alpaca.trading.client import TradingClient
     from alpaca.trading.enums import OrderSide, QueryOrderStatus, TimeInForce
     from alpaca.trading.requests import GetOrdersRequest, LimitOrderRequest, MarketOrderRequest
+    try:
+        from alpaca.trading.enums import PositionIntent
+    except ImportError:
+        PositionIntent = None
     ALPACA_IMPORT_ERROR = None
 except ImportError as exc:
     TradingClient = None
+    PositionIntent = None
     ALPACA_IMPORT_ERROR = exc
 
 st.set_page_config(page_title="TrendPulse | Alpaca Trade Desk", page_icon="⚡", layout="wide")
@@ -110,7 +118,64 @@ def valid_equity_symbol(symbol):
     return re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", symbol) is not None
 
 
-def review_order(client, paper, symbol, side, order_type, quantity_value, limit_price_value):
+def get_position_quantity(client, symbol):
+    try:
+        position = client.get_open_position(symbol)
+    except Exception as exc:
+        if getattr(exc, "status_code", None) == 404:
+            return Decimal("0")
+        raise
+    return Decimal(str(position.qty))
+
+
+def get_asset_borrow_status(symbol, api_key, secret_key, paper):
+    """Read the current borrow_status field, which is newer than alpaca-py's legacy field."""
+    host = "paper-api.alpaca.markets" if paper else "api.alpaca.markets"
+    request = Request(
+        f"https://{host}/v2/assets/{quote(symbol, safe='')}",
+        headers={
+            "APCA-API-KEY-ID": api_key,
+            "APCA-API-SECRET-KEY": secret_key,
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urlopen(request, timeout=10) as response:
+            asset = json.load(response)
+    except Exception:
+        raise ValueError("Alpaca could not verify share-borrow availability. No order was sent.") from None
+
+    if not bool(asset.get("shortable")):
+        raise ValueError("Alpaca does not mark this asset as shortable.")
+
+    borrow_status = asset.get("borrow_status")
+    if borrow_status is None:
+        legacy_easy_to_borrow = asset.get("easy_to_borrow")
+        if legacy_easy_to_borrow is True:
+            borrow_status = "easy_to_borrow"
+        elif legacy_easy_to_borrow is False:
+            borrow_status = "hard_to_borrow"
+
+    if borrow_status == "hard_to_borrow":
+        raise ValueError("This asset is hard to borrow and needs an Alpaca locate. The trade desk does not request locates.")
+    if borrow_status != "easy_to_borrow":
+        raise ValueError("Alpaca did not confirm that this asset is easy to borrow, so the short order was blocked.")
+    return borrow_status
+
+
+def review_order(
+    client,
+    paper,
+    symbol,
+    action,
+    order_type,
+    quantity_value,
+    limit_price_value,
+    account=None,
+    api_key=None,
+    secret_key=None,
+    client_order_id=None,
+):
     symbol = symbol.strip().upper()
     if not valid_equity_symbol(symbol):
         raise ValueError("Enter a valid US stock or ETF symbol, such as AAPL or BRK.B.")
@@ -148,25 +213,51 @@ def review_order(client, paper, symbol, side, order_type, quantity_value, limit_
     if order_type == "Market" and quantity != quantity.to_integral_value() and not bool(asset.fractionable):
         raise ValueError("This asset does not support fractional market orders.")
 
-    if side == "Sell":
-        try:
-            position = client.get_open_position(symbol)
-        except Exception as exc:
-            if getattr(exc, "status_code", None) == 404:
-                raise ValueError("No open long position was found. Short selling is disabled in this ticket.") from None
-            raise
-        held_quantity = Decimal(str(position.qty))
-        if held_quantity <= 0 or quantity > held_quantity:
-            raise ValueError(f"Sell quantity exceeds the long position available ({held_quantity} shares).")
+    if action not in {"Buy", "Sell", "Short sell", "Buy to cover"}:
+        raise ValueError("Choose Buy, Sell, Short sell, or Buy to cover.")
+    if action in {"Short sell", "Buy to cover"} and PositionIntent is None:
+        raise ValueError("This Alpaca SDK is missing stock position intents. Update alpaca-py before short selling.")
+
+    position_quantity = Decimal("0")
+    if action in {"Sell", "Short sell", "Buy to cover"} or (
+        action == "Buy" and hasattr(client, "get_open_position")
+    ):
+        position_quantity = get_position_quantity(client, symbol)
+
+    if action == "Buy" and position_quantity < 0:
+        raise ValueError("A short position is open. Use Buy to cover first, then place a separate Buy order if needed.")
+    if action == "Sell":
+        if position_quantity <= 0:
+            raise ValueError("No open long position was found. Choose Short sell to open a short position.")
+        if quantity > position_quantity:
+            raise ValueError(f"Sell quantity exceeds the long position available ({position_quantity} shares).")
+    if action == "Short sell":
+        if quantity != quantity.to_integral_value():
+            raise ValueError("Short sales require whole shares in this trade ticket.")
+        if position_quantity > 0:
+            raise ValueError("Close the existing long position before opening a short position in the same symbol.")
+        if account is None:
+            account = client.get_account()
+        if not bool(getattr(account, "shorting_enabled", False)):
+            raise ValueError("Alpaca reports that short selling is not enabled for this account.")
+        get_asset_borrow_status(symbol, api_key, secret_key, paper)
+    if action == "Buy to cover":
+        if quantity != quantity.to_integral_value():
+            raise ValueError("Buy-to-cover orders require whole shares in this trade ticket.")
+        if position_quantity >= 0:
+            raise ValueError("There is no open short position to cover.")
+        if quantity > abs(position_quantity):
+            raise ValueError(f"Cover quantity exceeds the open short position ({abs(position_quantity)} shares).")
 
     return {
         "symbol": symbol,
-        "side": side,
+        "action": action,
+        "side": "Buy" if action in {"Buy", "Buy to cover"} else "Sell",
         "order_type": order_type,
         "quantity": str(quantity.normalize()),
         "limit_price": str(limit_price.normalize()) if limit_price is not None else None,
         "paper": paper,
-        "client_order_id": f"trendpulse-{uuid.uuid4().hex}",
+        "client_order_id": client_order_id or f"trendpulse-{uuid.uuid4().hex}",
     }
 
 
@@ -189,6 +280,14 @@ def submit_order(client, order):
         "time_in_force": TimeInForce.DAY,
         "client_order_id": order["client_order_id"],
     }
+    if PositionIntent is not None:
+        intent = {
+            "Buy": PositionIntent.BUY_TO_OPEN,
+            "Sell": PositionIntent.SELL_TO_CLOSE,
+            "Short sell": PositionIntent.SELL_TO_OPEN,
+            "Buy to cover": PositionIntent.BUY_TO_CLOSE,
+        }[order["action"]]
+        common["position_intent"] = intent
     if order["order_type"] == "Market":
         request = MarketOrderRequest(**common)
     else:
@@ -276,6 +375,10 @@ if paper:
     st.info("PAPER MODE · Orders use Alpaca's simulated account and do not use real funds.")
 else:
     st.error("LIVE MODE · Orders submitted here use real funds in your Alpaca brokerage account.")
+if bool(getattr(account, "shorting_enabled", False)):
+    st.caption("Alpaca has short selling enabled for this account.")
+else:
+    st.caption("Alpaca does not currently report short-selling permission for this account.")
 if not can_trade:
     st.warning(f"Trading is disabled because the Alpaca account is restricted or not active (status: {account_status}).")
 
@@ -286,14 +389,14 @@ acct3.metric("Cash", money(account.cash))
 acct4.metric("Buying power", money(account.buying_power), help="Alpaca's available buying power; open orders may already reserve part of it.")
 
 st.markdown("### Order ticket")
-st.caption("Orders are DAY duration. Eligible market orders can use fractional quantities; limit orders use whole shares here and may not fill. Sell orders cannot open short positions.")
+st.caption("Orders are DAY duration. Market orders may use fractional quantities for eligible long positions; limit and short-sale orders use whole shares. Short sales require Alpaca account permission and an easy-to-borrow stock. Hard-to-borrow locates are not supported here. Short losses can exceed the original proceeds and may incur borrow costs.")
 
 default_symbol = str(st.session_state.get("active_symbol", "NVDA")).upper()
 with st.form("alpaca_order_ticket"):
     order_symbol = st.text_input("US stock or ETF symbol", value=default_symbol, max_chars=15, placeholder="AAPL")
     side_col, type_col, qty_col = st.columns([1, 1, 1])
     with side_col:
-        order_side = st.radio("Side", ["Buy", "Sell"], horizontal=True)
+        order_action = st.selectbox("Action", ["Buy", "Sell", "Short sell", "Buy to cover"])
     with type_col:
         order_type = st.selectbox("Order type", ["Limit", "Market"], index=0)
     with qty_col:
@@ -306,7 +409,16 @@ if review_clicked:
     st.session_state.pop("alpaca_last_order_message", None)
     try:
         st.session_state.alpaca_pending_order = review_order(
-            client, paper, order_symbol, order_side, order_type, quantity_value, limit_price_value
+            client,
+            paper,
+            order_symbol,
+            order_action,
+            order_type,
+            quantity_value,
+            limit_price_value,
+            account=account,
+            api_key=api_key,
+            secret_key=secret_key,
         )
     except ValueError as exc:
         st.error(str(exc))
@@ -328,7 +440,7 @@ if pending:
     estimated_value = Decimal(pending["quantity"]) * Decimal(pending["limit_price"]) if pending["limit_price"] else None
     st.markdown("#### Review before submitting")
     review1, review2, review3, review4 = st.columns(4)
-    review1.metric("Side", pending["side"])
+    review1.metric("Action", pending["action"])
     review2.metric("Symbol", pending["symbol"])
     review3.metric("Quantity", f"{pending['quantity']} shares")
     review4.metric("Order", pending["order_type"])
@@ -338,10 +450,10 @@ if pending:
         st.write("A market order has no guaranteed execution price and may fill at a different price from the latest displayed data.")
 
     if paper:
-        confirmation_label = f"I confirm this exact {pending['side'].lower()} order for {pending['quantity']} shares of {pending['symbol']} in PAPER mode."
+        confirmation_label = f"I confirm this exact {pending['action'].lower()} order for {pending['quantity']} shares of {pending['symbol']} in PAPER mode."
         live_word = "LIVE"
     else:
-        confirmation_label = f"I authorize this exact {pending['side'].lower()} order for {pending['quantity']} shares of {pending['symbol']} using REAL MONEY."
+        confirmation_label = f"I authorize this exact {pending['action'].lower()} order for {pending['quantity']} shares of {pending['symbol']} using REAL MONEY."
         live_word = st.text_input("Type LIVE to confirm this real-money order", key=f"live_{pending['client_order_id']}").strip()
     confirmed = st.checkbox(confirmation_label, key=f"confirm_{pending['client_order_id']}")
     submit_label = "Place paper order" if paper else "Place live order"
@@ -351,24 +463,35 @@ if pending:
         st.caption("Type LIVE exactly to enable the real-money submit button.")
     if st.button(submit_label, type="primary", disabled=not ready_to_submit, width="stretch"):
         try:
-            # Refresh account permissions and sellable quantity immediately before submission.
+            # Recheck account permission, borrow status, and position size immediately before submission.
             current_account = client.get_account()
             if not account_can_trade(current_account):
                 raise RuntimeError("The Alpaca account is no longer enabled for trading.")
-            if pending["side"] == "Sell":
-                current_position = client.get_open_position(pending["symbol"])
-                if Decimal(pending["quantity"]) > Decimal(str(current_position.qty)):
-                    raise RuntimeError("The held position changed; review the order again.")
+            current_order = review_order(
+                client,
+                paper,
+                pending["symbol"],
+                pending["action"],
+                pending["order_type"],
+                pending["quantity"],
+                pending["limit_price"] or "",
+                account=current_account,
+                api_key=api_key,
+                secret_key=secret_key,
+                client_order_id=pending["client_order_id"],
+            )
             with st.spinner("Checking for a duplicate and sending the order to Alpaca…"):
-                submitted_order, already_existed = submit_order(client, pending)
+                submitted_order, already_existed = submit_order(client, current_order)
             status = enum_text(submitted_order.status)
             if already_existed:
                 message = f"Alpaca already has this order (status: {status}); no duplicate was sent."
             else:
-                message = f"Alpaca accepted the {pending['side'].lower()} order for {pending['symbol']} ({pending['quantity']} shares). Status: {status}."
+                message = f"Alpaca accepted the {pending['action'].lower()} order for {pending['symbol']} ({pending['quantity']} shares). Status: {status}."
             st.session_state.alpaca_last_order_message = message
             st.session_state.pop("alpaca_pending_order", None)
             st.rerun()
+        except ValueError as exc:
+            st.error(f"Order not sent: {exc}")
         except Exception as exc:
             st.error("Alpaca did not confirm this order. Check Open orders before taking further action.")
             st.caption(f"Provider error type: {type(exc).__name__}. The reviewed client order ID is retained to prevent a duplicate on retry.")
@@ -380,17 +503,20 @@ with portfolio_tab:
     try:
         positions = client.get_all_positions()
         if positions:
-            position_rows = [
-                {
-                    "Symbol": position.symbol,
-                    "Quantity": position.qty,
-                    "Average entry": money(position.avg_entry_price),
-                    "Current price": money(position.current_price),
-                    "Market value": money(position.market_value),
-                    "Unrealized P/L": money(position.unrealized_pl),
-                }
-                for position in positions
-            ]
+            position_rows = []
+            for position in positions:
+                signed_quantity = Decimal(str(position.qty))
+                position_rows.append(
+                    {
+                        "Symbol": position.symbol,
+                        "Position": "Short" if signed_quantity < 0 else "Long",
+                        "Quantity": str(abs(signed_quantity).normalize()),
+                        "Average entry": money(position.avg_entry_price),
+                        "Current price": money(position.current_price),
+                        "Market value": money(position.market_value),
+                        "Unrealized P/L": money(position.unrealized_pl),
+                    }
+                )
             st.dataframe(pd.DataFrame(position_rows), hide_index=True, width="stretch")
         else:
             st.caption("No open positions.")
@@ -407,6 +533,9 @@ with orders_tab:
                 {
                     "Symbol": order.symbol,
                     "Side": enum_text(order.side).title(),
+                    "Position intent": enum_text(getattr(order, "position_intent", None)).replace("_", " ").title()
+                    if getattr(order, "position_intent", None)
+                    else "—",
                     "Type": enum_text(order.type).replace("_", " ").title(),
                     "Quantity": order.qty,
                     "Filled": order.filled_qty,
