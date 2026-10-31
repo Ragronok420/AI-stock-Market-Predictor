@@ -1,5 +1,6 @@
 import os
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -139,7 +140,21 @@ st.markdown("""
 # -----------------------------------------------------------------------------
 # Data Processing & Technical Engine
 # -----------------------------------------------------------------------------
-@st.cache_data(ttl=30, max_entries=32, show_spinner=False)
+AUTO_DATA_SOURCE = "Auto (Alpaca IEX + Yahoo)"
+
+
+def remember_data_source_choice():
+    st.session_state.data_source_user_selected = True
+
+
+def format_bar_timestamp(value):
+    timestamp = pd.Timestamp(value)
+    if timestamp.tzinfo is None:
+        return timestamp.strftime("%b %d, %Y")
+    return timestamp.strftime("%b %d, %Y · %I:%M %p %Z")
+
+
+@st.cache_data(ttl=15, max_entries=32, show_spinner=False)
 def fetch_stock_data(symbol: str, timeframe: str):
     """Fetches high-frequency intraday/daily bars depending on user timeframe."""
     period_map = {
@@ -196,6 +211,7 @@ def is_valid_alpaca_symbol(symbol: str) -> bool:
     return isinstance(symbol, str) and re.fullmatch(r"[A-Z][A-Z0-9.-]{0,14}", symbol) is not None
 
 
+@st.cache_data(ttl=15, max_entries=32, show_spinner=False)
 def fetch_alpaca_stock_data(symbol: str, timeframe: str, api_key: str, secret_key: str):
     """Fetch adjusted equity bars from Alpaca's IEX feed using the current session's keys."""
     interval_map = {
@@ -237,6 +253,79 @@ def fetch_alpaca_stock_data(symbol: str, timeframe: str, api_key: str, secret_ke
     )
     bars.index = pd.to_datetime(bars.index)
     return bars[["Open", "High", "Low", "Close", "Volume"]], interval
+
+
+def latest_bar_timestamp_utc(data):
+    timestamp = pd.Timestamp(data.index[-1])
+    if timestamp.tzinfo is None:
+        return timestamp.tz_localize("UTC")
+    return timestamp.tz_convert("UTC")
+
+
+def fetch_freshest_market_data(symbol: str, timeframe: str, api_key: str, secret_key: str):
+    """Check Alpaca IEX and Yahoo in parallel, then use one complete, freshest series."""
+    jobs = {
+        "Alpaca IEX": lambda: fetch_alpaca_stock_data(symbol, timeframe, api_key, secret_key),
+        "Yahoo Finance": lambda: fetch_stock_data(symbol, timeframe),
+    }
+    candidates = []
+    failures = {}
+    with ThreadPoolExecutor(max_workers=len(jobs)) as executor:
+        future_sources = {executor.submit(fetcher): source for source, fetcher in jobs.items()}
+        for future in as_completed(future_sources):
+            source = future_sources[future]
+            try:
+                data, interval = future.result()
+                if data is None or data.empty or len(data) < 30:
+                    failures[source] = "fewer than 30 usable bars"
+                    continue
+                candidates.append(
+                    {
+                        "source": source,
+                        "data": data,
+                        "interval": interval,
+                        "timestamp": latest_bar_timestamp_utc(data),
+                        "close": float(data["Close"].iloc[-1]),
+                    }
+                )
+            except Exception as exc:
+                failures[source] = type(exc).__name__
+
+    if not candidates:
+        failure_note = ", ".join(f"{source}: {reason}" for source, reason in failures.items())
+        raise RuntimeError(f"Neither market-data source returned enough usable bars. {failure_note}")
+
+    source_priority = {"Alpaca IEX": 1, "Yahoo Finance": 0}
+    chosen = max(candidates, key=lambda item: (item["timestamp"], source_priority[item["source"]]))
+    checked_at = datetime.now(timezone.utc)
+    detail_parts = ["Auto checked Alpaca IEX and Yahoo Finance."]
+
+    if len(candidates) == 2:
+        by_source = {item["source"]: item for item in candidates}
+        alpaca = by_source["Alpaca IEX"]
+        yahoo = by_source["Yahoo Finance"]
+        if alpaca["timestamp"] == yahoo["timestamp"]:
+            mean_close = (abs(alpaca["close"]) + abs(yahoo["close"])) / 2
+            close_difference = abs(alpaca["close"] - yahoo["close"])
+            difference_pct = close_difference / mean_close * 100 if mean_close else 0
+            detail_parts.append(f"Same-time close difference: {difference_pct:.2f}%.")
+        else:
+            detail_parts.append(
+                "Latest bars: "
+                f"Alpaca IEX {alpaca['timestamp'].strftime('%b %d, %Y %I:%M %p UTC')}; "
+                f"Yahoo Finance {yahoo['timestamp'].strftime('%b %d, %Y %I:%M %p UTC')}."
+            )
+    else:
+        unavailable_source = next(source for source in jobs if source not in {item["source"] for item in candidates})
+        reason = failures.get(unavailable_source, "no usable bars")
+        detail_parts.append(f"{unavailable_source} was unavailable ({reason}).")
+
+    detail_parts.append(f"Showing the freshest complete series from {chosen['source']}; candles are not blended.")
+    return chosen["data"], chosen["interval"], {
+        "source": chosen["source"],
+        "checked_at": checked_at,
+        "detail": " ".join(detail_parts),
+    }
 
 
 def build_demo_data(symbol: str, timeframe: str):
@@ -434,6 +523,7 @@ TIMEFRAME_OPTIONS = [
 st.session_state.setdefault("active_symbol", "NVDA")
 st.session_state.setdefault("active_timeframe", TIMEFRAME_OPTIONS[1])
 st.session_state.setdefault("active_data_source", "Yahoo Finance")
+st.session_state.setdefault("data_source_user_selected", False)
 if "demo_data_enabled" not in st.session_state:
     st.session_state.demo_data_enabled = st.query_params.get("demo") == "1"
 if "use_demo_toggle" not in st.session_state:
@@ -501,7 +591,9 @@ alpaca_source_available = (
 )
 data_source_options = ["Yahoo Finance"]
 if alpaca_source_available:
-    data_source_options.append("Alpaca (IEX)")
+    data_source_options = [AUTO_DATA_SOURCE, "Alpaca (IEX)", "Yahoo Finance"]
+    if not st.session_state.data_source_user_selected:
+        st.session_state.market_data_source_input = AUTO_DATA_SOURCE
 if st.session_state.get("market_data_source_input") not in data_source_options:
     st.session_state.market_data_source_input = (
         st.session_state.active_data_source
@@ -512,7 +604,8 @@ data_source = st.sidebar.selectbox(
     "Market data source",
     options=data_source_options,
     key="market_data_source_input",
-    help="Alpaca IEX requires a connected Alpaca account and is available for US stocks and ETFs.",
+    on_change=remember_data_source_choice,
+    help="Auto compares the latest Alpaca IEX and Yahoo Finance bars when your Alpaca account is connected. Alpaca IEX covers one exchange.",
 )
 st.session_state.active_data_source = data_source
 if ALPACA_DATA_IMPORT_ERROR is not None:
@@ -526,13 +619,16 @@ st.sidebar.markdown("---")
 refresh_btn = st.sidebar.button("↻ Refresh market data", type="primary", width="stretch")
 if st.session_state.demo_data_enabled:
     source_note = "Synthetic demo mode is on; live market-data providers are not queried."
+elif data_source == AUTO_DATA_SOURCE:
+    source_note = "Auto checks Alpaca IEX and Yahoo Finance, then shows the complete series with the newest latest-bar timestamp. The feeds are not blended."
 elif data_source == "Alpaca (IEX)":
-    source_note = "Alpaca IEX market data uses this session's connected Alpaca account."
+    source_note = "Alpaca IEX uses this session's connected account and covers the IEX exchange only."
 else:
     source_note = "Yahoo Finance quotes may be delayed."
 st.sidebar.markdown(f'<div class="sidebar-note">{source_note} Refresh to request the latest available bars.</div>', unsafe_allow_html=True)
 if refresh_btn:
     fetch_stock_data.clear()
+    fetch_alpaca_stock_data.clear()
 
 
 # -----------------------------------------------------------------------------
@@ -545,19 +641,39 @@ if not is_valid_symbol(symbol):
     st.error("The ticker format is invalid. Use letters, numbers, dots, hyphens, or a leading ^ / ending =X.")
     st.stop()
 
+market_data_status = {
+    "source": "Synthetic demo",
+    "checked_at": datetime.now(timezone.utc),
+    "detail": "Synthetic prices are generated for interface testing; live providers were not queried.",
+}
 try:
     if st.session_state.demo_data_enabled:
         st.info("DEMO PREVIEW · Synthetic prices for interface testing; not live market data.")
         with st.spinner("Building a sample market snapshot…"):
             raw_df, interval_used = build_demo_data(symbol, timeframe)
+    elif data_source == AUTO_DATA_SOURCE:
+        with st.spinner("Checking Alpaca IEX and Yahoo Finance for the freshest complete bars…"):
+            raw_df, interval_used, market_data_status = fetch_freshest_market_data(
+                symbol, timeframe, alpaca_api_key, alpaca_secret_key
+            )
     elif data_source == "Alpaca (IEX)":
         with st.spinner(f"Loading Alpaca IEX market data for {symbol}…"):
             raw_df, interval_used = fetch_alpaca_stock_data(
                 symbol, timeframe, alpaca_api_key, alpaca_secret_key
             )
+        market_data_status = {
+            "source": "Alpaca IEX",
+            "checked_at": datetime.now(timezone.utc),
+            "detail": "Single source selected. Alpaca IEX covers the IEX exchange only.",
+        }
     else:
         with st.spinner(f"Loading market data for {symbol}…"):
             raw_df, interval_used = fetch_stock_data(symbol, timeframe)
+        market_data_status = {
+            "source": "Yahoo Finance",
+            "checked_at": datetime.now(timezone.utc),
+            "detail": "Single source selected. Yahoo Finance quotes may be delayed.",
+        }
 except Exception as exc:
     st.error(f"We couldn't load market data for **{symbol}**.")
     st.caption("Check the ticker spelling and your internet connection, then try refreshing the data.")
@@ -587,12 +703,13 @@ else:
         with head_col1:
             st.markdown('<div class="eyebrow">Market overview</div>', unsafe_allow_html=True)
             st.title(symbol)
-            source_label = "Synthetic demo" if st.session_state.demo_data_enabled else data_source
             st.markdown(
-                f'<div class="section-intro">{timeframe} forecast · {interval_used} bars · {source_label} · '
-                f'Latest bar: {df.index[-1].strftime("%b %d, %Y · %I:%M %p %Z")}</div>',
+                f'<div class="section-intro">{timeframe} forecast · {interval_used} bars · {market_data_status["source"]} · '
+                f'Latest bar: {format_bar_timestamp(df.index[-1])}</div>',
                 unsafe_allow_html=True,
             )
+            checked_at = market_data_status["checked_at"].strftime("%b %d, %Y %I:%M:%S %p UTC")
+            st.caption(f"Checked {checked_at}. {market_data_status['detail']}")
         with head_col2:
             st.metric(
                 label="Latest bar close",

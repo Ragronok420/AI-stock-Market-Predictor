@@ -6,7 +6,7 @@ TrendPulse is a real-time market trend prediction and technical analysis dashboa
 
 ## ✨ Features
 
-- **Market Data:** Uses Yahoo Finance by default, with an optional Alpaca IEX feed for US stocks and ETFs after connecting an Alpaca account.
+- **Multi-source Market Data:** When Alpaca is connected, Auto checks Alpaca IEX and Yahoo Finance together, selects the complete series with the newest latest-bar timestamp, and reports the same-time close difference when both feeds align. It never blends candles from different providers.
 - **Hybrid AI Engine:** Blends Random Forest machine learning classification with a technical confluence rule engine.
 - **Explainable AI (XAI):** Plain-English breakdown explaining the exact reasoning behind every bullish, bearish, or neutral rating.
 - **Dynamic Trade Planning:** Automated volatility-based Take-Profit and Stop-Loss levels computed via Average True Range (ATR).
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 
 ### 4. Configure Alpaca
 
-Copy `.env.example` to `.env` to configure the account mode. `.env` is ignored by Git. The Trade page asks each browser session for its own Alpaca API key and secret. The fields are masked; credentials are held in that Streamlit session's server-side memory and are not written to disk, the repository, or shared with another session. Each person must create their own key pair in Alpaca. TrendPulse does not generate broker keys. When connected, the market dashboard offers Alpaca IEX bars for US stocks and ETFs; Yahoo Finance remains the default for other tickers and when no Alpaca account is connected. The pinned `alpaca-py` dependency is installed with `pip install -r requirements.txt`.
+Copy `.env.example` to `.env` to configure the account mode. `.env` is ignored by Git. The Trade page asks each browser session for its own Alpaca API key and secret. The fields are masked; credentials are held in that Streamlit session's server-side memory and are not written to disk, the repository, or shared with another session. Each person must create their own key pair in Alpaca. TrendPulse does not generate broker keys. With Alpaca connected and a standard US stock or ETF selected, Auto checks Alpaca IEX and Yahoo Finance and displays one provider's complete series based on its newest bar timestamp. When bar timestamps align, the dashboard also reports the difference between the two latest closes. It never mixes the providers' candles. Alpaca IEX covers the IEX exchange only, while Yahoo Finance quotes may be delayed, so this check does not guarantee consolidated real-time coverage. Manual refresh requests new bars and clears the app's short-lived data cache. The pinned `alpaca-py` dependency is installed with `pip install -r requirements.txt`.
 
 Paper mode is the default. To enable live trading, explicitly set `ALPACA_PAPER=false` and `ALPACA_ENABLE_LIVE_TRADING=true` in `.env`, then connect using your own live key pair. The Trade page also requires an order preview, a confirmation checkbox, and typing `LIVE` before it will submit a live order. Never paste API keys into source code or commit them. The app has no sign-in system, so these credentials are isolated per browser session rather than bound to a verified identity; use authentication and HTTPS before hosting it for multiple people.
 
